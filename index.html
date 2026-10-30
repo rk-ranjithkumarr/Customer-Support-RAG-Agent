@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support Assistant</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1b1f24;--mute:#6b7480;--brand:#4f46e5;--line:#e4e7ec;--bot:#f0f1f5}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a21;--ink:#e8eaf0;--mute:#8b94a3;--line:#262b35;--bot:#20242e}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,sans-serif;height:100vh;display:flex;justify-content:center}
+.app{width:100%;max-width:760px;display:flex;flex-direction:column;height:100vh;background:var(--card);border-inline:1px solid var(--line)}
+header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+header h1{font-size:16px;margin:0;flex:1}.dot{width:9px;height:9px;border-radius:50%;background:#f59e0b}.dot.on{background:#22c55e}
+.meta{font-size:12px;color:var(--mute)}
+button,label.btn{background:var(--brand);color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font:inherit;font-size:13px}
+button.ghost,label.btn{background:transparent;color:var(--ink);border:1px solid var(--line)}
+#log{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:85%;padding:10px 14px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word}
+.user{align-self:flex-end;background:var(--brand);color:#fff;border-bottom-right-radius:4px}
+.bot{align-self:flex-start;background:var(--bot);border-bottom-left-radius:4px}
+.src{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.chip{font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute);cursor:help}
+.ticket{margin-top:10px;display:flex;gap:6px}.ticket input{flex:1;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit}
+.suggest{display:flex;gap:8px;flex-wrap:wrap;padding:0 18px 8px}
+form{display:flex;gap:8px;padding:14px 18px;border-top:1px solid var(--line)}
+form input{flex:1;padding:11px 14px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="dot" id="dot"></span><h1>Support Assistant</h1>
+    <span class="meta" id="meta"></span>
+    <label class="btn">Upload doc<input type="file" id="file" hidden accept=".md,.txt,.pdf"></label>
+  </header>
+  <div id="log"></div>
+  <div class="suggest" id="suggest"></div>
+  <form id="form"><input id="input" placeholder="Ask a question..." autocomplete="off" autofocus><button>Send</button></form>
+</div>
+<script>
+const sid = "s-" + Math.random().toString(36).slice(2, 10);
+const log = document.getElementById("log"), input = document.getElementById("input");
+let ws, cur, curSources, busy = false;
+
+function add(cls, text = "") { const d = document.createElement("div"); d.className = "msg " + cls; d.textContent = text; log.appendChild(d); log.scrollTop = log.scrollHeight; return d; }
+
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/chat");
+  ws.onopen = () => document.getElementById("dot").classList.add("on");
+  ws.onclose = () => { document.getElementById("dot").classList.remove("on"); setTimeout(connect, 1500); };
+  ws.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === "sources") {
+      curSources = document.createElement("div"); curSources.className = "src";
+      ev.sources.forEach(s => { const c = document.createElement("span"); c.className = "chip"; c.title = s.snippet; c.textContent = `[${s.n}] ${s.source}`; curSources.appendChild(c); });
+    } else if (ev.type === "token") {
+      cur.textContent += ev.text; log.scrollTop = log.scrollHeight;
+    } else if (ev.type === "done") {
+      if (curSources) { cur.appendChild(curSources); curSources = null; }
+      if (ev.escalate) addTicketForm(cur);
+      busy = false;
+    }
+  };
+}
+
+function addTicketForm(parent) {
+  const w = document.createElement("div"); w.className = "ticket";
+  w.innerHTML = '<input type="email" placeholder="your@email.com"><button>Create ticket</button>';
+  w.querySelector("button").onclick = async () => {
+    const email = w.querySelector("input").value;
+    const r = await fetch("/api/tickets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sid, email }) });
+    const j = await r.json();
+    w.textContent = r.ok ? `Ticket #${j.ticket_id} created. Our team will email you soon.` : (j.detail || "Error");
+  };
+  parent.appendChild(w);
+}
+
+function send(text) {
+  if (!text || busy || ws.readyState !== 1) return;
+  busy = true; add("user", text); cur = add("bot");
+  ws.send(JSON.stringify({ message: text, session_id: sid }));
+}
+
+document.getElementById("form").onsubmit = (e) => { e.preventDefault(); send(input.value.trim()); input.value = ""; };
+["How do I get a refund?", "What does the Pro plan cost?", "Reset my password", "API rate limits"].forEach(q => {
+  const b = document.createElement("button"); b.className = "ghost"; b.textContent = q; b.onclick = () => send(q); document.getElementById("suggest").appendChild(b);
+});
+document.getElementById("file").onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  const r = await fetch("/api/upload", { method: "POST", body: fd }); const j = await r.json();
+  add("bot", r.ok ? `Indexed "${j.uploaded}" - knowledge base now has ${j.chunks} chunks. Ask me about it!` : (j.detail || "Upload failed"));
+};
+fetch("/api/health").then(r => r.json()).then(h => document.getElementById("meta").textContent = `${h.chunks} chunks - ${h.llm}`);
+add("bot", "Hi! Ask me about billing, plans, account security, or the API.");
+connect();
+</script>
+</body>
+</html>
